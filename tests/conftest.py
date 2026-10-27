@@ -29,9 +29,23 @@ def database_urls():
         pytest.fail("Tests require a codestra_whatsapp_commerce_test-prefixed database")
     # Explicit test operator action. Password can persist across repeated local runs.
     password = os.environ.get("TEST_DATABASE_APP_PASSWORD", "local-isolated-test-app-password-only")
-    provision_database(admin, database, password)
+    provision_database(
+        admin,
+        database,
+        password,
+        migrator_password=os.environ.get(
+            "TEST_DATABASE_MIGRATOR_PASSWORD", "local-isolated-test-migrator-password-only"
+        ),
+    )
     owner = make_url(admin).set(database=database)
-    migrate_database(owner)
+    migrate_database(
+        owner.set(
+            username="codestra_whatsapp_migrator",
+            password=os.environ.get(
+                "TEST_DATABASE_MIGRATOR_PASSWORD", "local-isolated-test-migrator-password-only"
+            ),
+        )
+    )
     app = owner.set(username="codestra_whatsapp_app", password=password)
     return owner, app
 
@@ -41,6 +55,16 @@ def admin_engine(database_urls):
     engine = make_engine(database_urls[0])
     yield engine
     engine.dispose()
+
+
+@pytest.fixture(scope="session")
+def migrator_url(database_urls):
+    return database_urls[0].set(
+        username="codestra_whatsapp_migrator",
+        password=os.environ.get(
+            "TEST_DATABASE_MIGRATOR_PASSWORD", "local-isolated-test-migrator-password-only"
+        ),
+    )
 
 
 @pytest.fixture(scope="session")

@@ -2,16 +2,16 @@
 
 ## Local result
 
-The assembled implementation passed **148 tests in 6.48 seconds** on Python 3.12.14 and a separate, disposable PostgreSQL 16.15 cluster. The runtime assertions used `codestra_whatsapp_app`; privileged setup and recovery used an isolated test operator connection. No production database, customer record or external provider send was involved.
+The reviewed implementation passed **193 tests in 9.68 seconds** on Python 3.12.14 and a separate, disposable PostgreSQL 16.15 cluster. This extends the original 148-test baseline with named-migrator and operational-security regressions. Migrations and operator actions authenticate as `codestra_whatsapp_migrator`; runtime assertions use `codestra_whatsapp_app`. The isolated administrator is used for bootstrap, recovery and deliberate privilege-drift probes. No production database, customer record or external provider send was involved.
 
 The published pull request records the exact source commit and remote tree verification. These checks establish the source behavior exercised here; they do not certify a deployed environment or substitute for required GitHub/authority reviews.
 
 | Verification | Observed result |
 | --- | --- |
-| Complete pytest suite | 148 passed; one third-party Starlette warning about future TestClient transport compatibility. |
+| Complete pytest suite | 193 passed; one third-party Starlette warning about future TestClient transport compatibility. |
 | Ruff lint and format | Passed across the repository, including Python code examples. |
 | Wheel build | `codestra_whatsapp_commerce-0.1.0-py3-none-any.whl` built successfully. |
-| Installed wheel migration smoke | Imported outside the source checkout; packaged migrations created 16 tables, reran safely and reported revision `0001_commerce` in a unique disposable database. |
+| Installed wheel migration smoke | Imported outside the source checkout; the actual named migrator CLI applied/reran packaged migrations and onboarded a business. All 16 FORCE RLS tables and `public.alembic_version` retained owner identity at revision `0001_commerce`; the unique test database was removed. |
 | Frozen dependency audit | No known vulnerabilities reported for the exported locked development/runtime dependency set. This is a point-in-time advisory result. |
 | Generated OpenAPI | 31 paths generated from the application in `docs/openapi.json`. |
 | Compose/CI validation | YAML and shell syntax, action pins, environment separation, profiles, localhost bindings and HBA policies verified. |
@@ -20,7 +20,9 @@ The published pull request records the exact source commit and remote tree verif
 ## Meaningful scenarios exercised
 
 - All 16 tenant tables use ENABLE/FORCE RLS with dedicated ownership. No-context access, cross-tenant reads/writes/foreign keys, owner/DDL privilege attempts and context reuse after commit/error are checked with real PostgreSQL.
-- App-role connections to unrelated databases fail under the test HBA even while PostgreSQL's default PUBLIC CONNECT grant remains true. Production HBA installation remains a separate operator gate.
+- Both app and migrator connections to unrelated databases fail under the test HBA even while PostgreSQL's default PUBLIC CONNECT grant remains true. A second isolated cluster also validated the actual CI and Compose HBA templates for both logins, including Unix-socket denials and zero parsing errors. Production HBA installation remains a separate operator gate.
+- The named migrator has SET-only owner membership and no inherited owner authority. Fresh and repeated migrations, a follow-up revision, failed-upgrade rollback, onboarding and channel registration run through its actual login. The version table and all commerce objects retain dedicated ownership. The initial SQL snapshot remains byte-identical to the original PR.
+- The legacy version-table handoff accepts only the authenticated provisioning administrator's original table and known revision. Unexpected owners, columns, defaults, constraints, triggers, rewrite rules, inheritance or partitioning are refused. Runtime admission rejects administrator sessions disguised as the app, ownership/elevation drift and both persistent and temporary object-creation privileges.
 - Two concurrent checkouts for the last stock unit cannot oversell. Reconfirmation returns the existing order, accepted alias keys remain bound to their original quote, and cancellation/expiry/collection adjust inventory exactly once.
 - Tax, hours, price, cart, zone and expiry changes invalidate checkout as appropriate. Concurrent staff acceptance, settings writes and membership demotion have explicit regression coverage.
 - JWT signature, algorithm, issuer, audience, expiry, malformed/nested claims and bounded JWKS failure paths fail closed. A tenant header never authorizes access without a persisted active membership.
@@ -34,11 +36,13 @@ The published pull request records the exact source commit and remote tree verif
 
 Separate reviewers assessed application/persistence authorization and the messaging/identity boundary. All reported material findings were reproduced and corrected. The application reviewer verified 11 focused correction checks; the messaging reviewer verified 14 PostgreSQL regressions and a later 46-test HTTP/auth/runtime correction suite. Details and design rulings are summarized in `ledger.md`.
 
+The next-phase migrator review independently reproduced a missed `TEMPORARY` database privilege: an app with no persistent CREATE permission could create temporary tables and pass the old guard. After correction, the reviewer confirmed clean access succeeds, the extra privilege causes refusal, and revocation restores safe admission. No unresolved material findings remained in that review.
+
 These are independent technical reviews within the implementation session. Required external repository reviews, status checks and promotion approvals remain governed by the project's normal branch process.
 
 ## Commands and prerequisites
 
-The full suite was executed with an explicitly isolated `TEST_DATABASE_ADMIN_URL`, a `codestra_whatsapp_commerce_test...` target, matching PostgreSQL client binaries, and app-only HBA restrictions. Credentials were read privately by the runner and were not printed or committed.
+The full suite was executed with an explicitly isolated `TEST_DATABASE_ADMIN_URL`, a `codestra_whatsapp_commerce_test...` target, matching PostgreSQL client binaries, and HBA restrictions for both dedicated logins. Credentials were read privately by the runner and were not printed or committed.
 
 ```bash
 uv run --frozen --extra dev pytest -q

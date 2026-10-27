@@ -45,15 +45,17 @@ Use the dedicated development database in this Compose project. Existing control
    python3 -c 'import secrets; print(secrets.token_hex(32))'
    ```
 
-   Generate a different value for `COMMERCE_POSTGRES_ADMIN_PASSWORD`, `COMMERCE_APP_PASSWORD`, and `COMMERCE_INGRESS_SECRET`. Put the values in `.env`; do not commit that file. Configure `COMMERCE_JWT_ISSUER`, `COMMERCE_JWT_AUDIENCE` and either `COMMERCE_JWKS_URL` or `COMMERCE_JWT_PUBLIC_KEY` for your identity service. Leave outbound delivery disabled.
+   Generate a different value for `COMMERCE_POSTGRES_ADMIN_PASSWORD`, `COMMERCE_MIGRATOR_PASSWORD`, `COMMERCE_APP_PASSWORD`, and `COMMERCE_INGRESS_SECRET`. Put the values in `.env`; do not commit that file. Configure `COMMERCE_JWT_ISSUER`, `COMMERCE_JWT_AUDIENCE` and either `COMMERCE_JWKS_URL` or `COMMERCE_JWT_PUBLIC_KEY` for your identity service. Leave outbound delivery disabled.
 
 2. Start PostgreSQL, then explicitly provision and migrate:
 
    ```bash
    docker compose up -d db
-   docker compose --profile operator run --rm operator provision --database codestra_whatsapp_commerce
+   docker compose --profile operator run --rm provisioner
    docker compose --profile operator run --rm operator migrate
    ```
+
+   The provisioner uses the cluster bootstrap credential only to create and validate the dedicated database and roles. Subsequent operator commands authenticate as `codestra_whatsapp_migrator` and explicitly assume the NOLOGIN owner within their transaction. API and worker containers receive only the `codestra_whatsapp_app` credential. Both login roles are restricted to the commerce database by the supplied local HBA rules; review deployment-specific rules before using an existing PostgreSQL host.
 
 3. Create a business with the owner's verified identity-service subject:
 

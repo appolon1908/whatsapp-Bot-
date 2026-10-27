@@ -99,6 +99,8 @@ Authorization: `Bearer <COMMERCE_POLICY_BEARER_TOKEN>`. The origin is explicit c
 
 The policy API must independently authorize the integration and enforce its own rules; these fields are evidence, not permission to bypass policy. Before submission the bot rechecks active business/channel, campaign configuration, consent, bot mode and the conversation version while holding the relevant transaction locks.
 
+The current worker identifies itself as `commerce-worker`. Middleware requires the submitted `requested_by` to equal the authenticated token subject, requires the `platform.command` scope, and checks the tenant and header/body identifiers. Provision the matching service identity and tenant authorization through the identity system before staging submission. A configured bearer string or a successful local mock does not prove those permissions.
+
 ### Required acknowledgement
 
 HTTP 200, 201 or 202 with JSON containing both:
@@ -157,3 +159,14 @@ The repository review recorded these external gaps; they must be resolved and re
 6. A controlled staging business must complete consent → catalog → cart → quote → confirm → fulfillment → delivery-status correlation, plus timeout replay, duplicate webhook and human takeover cases, through the real policy/middleware/provider path.
 
 `COMMERCE_OUTBOUND_ENABLED` remains false until these gates and the operational gates are evidenced. Do not work around a missing handler, campaign field or acknowledgement with direct sending.
+
+### Effect flags across the staging path
+
+| Component | Configuration to verify |
+| --- | --- |
+| This bot | `COMMERCE_OUTBOUND_ENABLED=false` initially. `WHATSAPP_DELIVERY_ENABLED` does not enable or disable this worker. |
+| WhatsApp policy API | `WHATSAPP_PRODUCTION_SEND` and `WHATSAPP_EXTERNAL_RECIPIENTS`, with approved campaign and recipient policy. |
+| Middleware V3 | `ENABLE_EXTERNAL_DELIVERY`, `WHATSAPP_DELIVERY_ENABLED`, and `EXTERNAL_DELIVERY_ENABLED`; verify which checks the deployed handler actually enforces. |
+| Evolution adapter | `EXTERNAL_SEND_ENABLED`, authenticated provider webhooks, and verified tenant-specific routing. |
+
+Before enabling a controlled test, record exact deployed commits, the approved staging recipient and channel tuple, authenticated service identity, and the effective gates at each hop. Loading a similarly named variable is not proof that the sending path checks it. Start with the bot gate off, verify persistence and readiness, then enable only the authorized staging path after callback signing, correlation and tenant routing have passed. Review pending replies before activation and restore the bot gate to false after the test window.

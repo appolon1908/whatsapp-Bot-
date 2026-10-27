@@ -67,14 +67,21 @@ services:
       <<: *runtime-environment
       COMMERCE_WORKER_TENANT_IDS: ${COMMERCE_WORKER_TENANT_IDS:-[]}
 
+  provisioner:
+    <<: *application
+    profiles: [operator]
+    command: [provision, --database, codestra_whatsapp_commerce]
+    environment:
+      COMMERCE_ADMIN_DATABASE_URL: postgresql+psycopg://commerce_operator:${COMMERCE_POSTGRES_ADMIN_PASSWORD:?Set a generated hexadecimal admin password in .env}@db:5432/postgres
+      COMMERCE_APP_PASSWORD: ${COMMERCE_APP_PASSWORD:?Set a generated hexadecimal app password in .env}
+      COMMERCE_MIGRATOR_PASSWORD: ${COMMERCE_MIGRATOR_PASSWORD:?Set a distinct generated hexadecimal migrator password in .env}
+
   operator:
     <<: *application
     profiles: [operator]
     command: [--help]
     environment:
-      COMMERCE_ADMIN_DATABASE_URL: postgresql+psycopg://commerce_operator:${COMMERCE_POSTGRES_ADMIN_PASSWORD:?Set a generated hexadecimal admin password in .env}@db:5432/postgres
-      COMMERCE_OWNER_DATABASE_URL: postgresql+psycopg://commerce_operator:${COMMERCE_POSTGRES_ADMIN_PASSWORD:?Set a generated hexadecimal admin password in .env}@db:5432/codestra_whatsapp_commerce
-      COMMERCE_APP_PASSWORD: ${COMMERCE_APP_PASSWORD:?Set a generated hexadecimal app password in .env}
+      COMMERCE_MIGRATOR_DATABASE_URL: postgresql+psycopg://codestra_whatsapp_migrator:${COMMERCE_MIGRATOR_PASSWORD:?Set a distinct generated hexadecimal migrator password in .env}@db:5432/codestra_whatsapp_commerce
 
 volumes:
   commerce-local-postgres:

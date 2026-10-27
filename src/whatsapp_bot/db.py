@@ -50,14 +50,59 @@ def lookup_channel(engine, provider: str, account_id: str, phone_number_id: str)
         return (row.tenant_id, row.channel_id) if row else None
 
 
+def activate_operator_role(connection):
+    """Assume the NOLOGIN owner only inside an explicit migrator transaction."""
+    validate_database_name(connection.engine.url.database or "")
+    if not connection.in_transaction():
+        raise RuntimeError("Explicit operator transaction is required")
+    assert_database_target(connection)
+    role = connection.execute(
+        text("""SELECT session_user AS login_role, current_user AS effective_role,
+        r.rolcanlogin AND NOT (r.rolsuper OR r.rolbypassrls OR r.rolcreatedb
+            OR r.rolcreaterole OR r.rolinherit OR r.rolreplication) AS safe_login,
+        NOT (o.rolcanlogin OR o.rolsuper OR o.rolbypassrls OR o.rolcreatedb
+            OR o.rolcreaterole OR o.rolinherit OR o.rolreplication) AS safe_owner,
+        pg_has_role(r.oid,o.oid,'SET') AS can_set_owner,
+        pg_has_role(r.oid,o.oid,'USAGE') AS inherits_owner,
+        EXISTS (SELECT 1 FROM pg_database d
+            WHERE d.datname=current_database() AND d.datdba=o.oid) AS owns_database,
+        EXISTS (SELECT 1 FROM pg_auth_members m
+            WHERE (m.member IN (r.oid,o.oid) OR m.roleid IN (r.oid,o.oid))
+            AND NOT (m.member=r.oid AND m.roleid=o.oid AND m.set_option
+                     AND NOT m.inherit_option AND NOT m.admin_option)) AS unsafe_memberships
+        FROM pg_roles r JOIN pg_roles o ON o.rolname='codestra_whatsapp_owner'
+        WHERE r.rolname=session_user""")
+    ).one_or_none()
+    if (
+        role is None
+        or role.login_role != "codestra_whatsapp_migrator"
+        or role.effective_role != "codestra_whatsapp_migrator"
+        or not role.safe_login
+        or not role.safe_owner
+        or not role.can_set_owner
+        or role.inherits_owner
+        or not role.owns_database
+        or role.unsafe_memberships
+    ):
+        raise RuntimeError("Explicit restricted migrator operator connection is required")
+    connection.execute(text("SET LOCAL ROLE codestra_whatsapp_owner"))
+
+
 def assert_runtime_role(engine):
     with engine.connect() as connection:
         role = connection.execute(
-            text("""SELECT current_database() AS db, r.rolname, r.rolsuper, r.rolbypassrls,
-            r.rolcreatedb, r.rolcreaterole,
-            pg_has_role(current_user, 'codestra_whatsapp_owner', 'MEMBER') AS owner_member,
-            EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-                    WHERE n.nspname='commerce' AND c.relowner=r.oid) AS owns_tables
+            text("""SELECT current_database() AS db, session_user AS login_role,
+            r.rolname, r.rolsuper, r.rolbypassrls,
+            r.rolcreatedb, r.rolcreaterole, r.rolinherit, r.rolreplication, r.rolcanlogin,
+            EXISTS (SELECT 1 FROM pg_auth_members m WHERE m.member=r.oid) AS role_member,
+            EXISTS (SELECT 1 FROM pg_shdepend d WHERE d.refclassid='pg_authid'::regclass
+                    AND d.refobjid=r.oid AND d.deptype='o'
+                    AND d.dbid IN (0,(SELECT oid FROM pg_database WHERE datname=current_database())))
+                    AS owns_objects,
+            has_database_privilege(r.oid,current_database(),'CREATE')
+                OR has_database_privilege(r.oid,current_database(),'TEMPORARY') OR EXISTS (
+                SELECT 1 FROM pg_namespace n WHERE has_schema_privilege(r.oid,n.oid,'CREATE'))
+                    AS can_create_objects
             FROM pg_roles r WHERE r.rolname=current_user""")
         ).one()
         try:
@@ -68,11 +113,16 @@ def assert_runtime_role(engine):
             raise RuntimeError("Runtime connection does not match the explicit database target")
         if (
             role.rolname != "codestra_whatsapp_app"
+            or role.login_role != "codestra_whatsapp_app"
             or role.rolsuper
             or role.rolbypassrls
             or role.rolcreatedb
             or role.rolcreaterole
-            or role.owner_member
-            or role.owns_tables
+            or role.rolinherit
+            or role.rolreplication
+            or not role.rolcanlogin
+            or role.role_member
+            or role.owns_objects
+            or role.can_create_objects
         ):
-            raise RuntimeError("Runtime role must not be privileged or own commerce tables")
+            raise RuntimeError("Runtime role must not be privileged or own schema objects")

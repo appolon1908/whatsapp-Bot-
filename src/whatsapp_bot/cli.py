@@ -32,6 +32,14 @@ def _required_env(name):
     return value
 
 
+def _migrator_url():
+    current = os.environ.get("COMMERCE_MIGRATOR_DATABASE_URL", "")
+    legacy = os.environ.get("COMMERCE_OWNER_DATABASE_URL", "")
+    if current and legacy and current != legacy:
+        raise CommandError("invalid_configuration")
+    return current if current.strip() else _required_env("COMMERCE_OWNER_DATABASE_URL")
+
+
 def _parser():
     parser = argparse.ArgumentParser(prog="commerce", description="Codestra WhatsApp commerce operations")
     parser.add_argument("--version", action="version", version=__version__)
@@ -46,7 +54,7 @@ def _parser():
         "provision", help="Explicitly create the dedicated commerce database/roles"
     )
     provision.add_argument("--database", required=True)
-    commands.add_parser("migrate", help="Explicitly apply migrations with an operator connection")
+    commands.add_parser("migrate", help="Apply migrations using the dedicated migrator login")
     onboard = commands.add_parser(
         "onboard-business", help="Create a business and its initial verified subject"
     )
@@ -134,17 +142,18 @@ def _execute(args):
             _required_env("COMMERCE_ADMIN_DATABASE_URL"),
             args.database,
             _required_env("COMMERCE_APP_PASSWORD"),
+            migrator_password=_required_env("COMMERCE_MIGRATOR_PASSWORD"),
         )
-    owner_url = _required_env("COMMERCE_OWNER_DATABASE_URL")
+    migrator_url = _migrator_url()
     if args.command == "migrate":
-        migrate_database(owner_url)
+        migrate_database(migrator_url)
         return {"status": "migrated"}
     if args.command == "onboard-business":
         return bootstrap_business(
-            owner_url, args.name, args.currency, args.timezone, args.owner_subject, args.tax_bps
+            migrator_url, args.name, args.currency, args.timezone, args.owner_subject, args.tax_bps
         )
     return register_channel(
-        owner_url,
+        migrator_url,
         args.tenant_id,
         args.provider,
         args.account_id,

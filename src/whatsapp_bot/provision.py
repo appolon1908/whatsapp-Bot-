@@ -11,14 +11,21 @@ from psycopg import sql
 from sqlalchemy import select, text
 from sqlalchemy.engine import make_url
 
-from whatsapp_bot.db import assert_database_target, make_engine, tenant_session, validate_database_name
+from whatsapp_bot.db import (
+    activate_operator_role,
+    assert_database_target,
+    make_engine,
+    tenant_session,
+    validate_database_name,
+)
 from whatsapp_bot.models import AuditEvent, Business, Channel, Membership
 
 OWNER = "codestra_whatsapp_owner"
 APP = "codestra_whatsapp_app"
+MIGRATOR = "codestra_whatsapp_migrator"
 
 
-def provision_database(admin_url, database_name, app_password):
+def provision_database(admin_url, database_name, app_password, *, migrator_password):
     """Create only the explicitly named commerce DB and dedicated global roles.
 
     Existing role passwords are intentionally not rotated. pg_hba restrictions are a
@@ -28,6 +35,10 @@ def provision_database(admin_url, database_name, app_password):
     validate_database_name(database_name)
     if not isinstance(app_password, str) or len(app_password) < 24:
         raise ValueError("Application password must contain at least 24 characters")
+    if not isinstance(migrator_password, str) or len(migrator_password) < 24:
+        raise ValueError("Migrator password must contain at least 24 characters")
+    if migrator_password == app_password:
+        raise ValueError("Migrator password must be independent of the application password")
     engine = make_engine(admin_url)
     try:
         with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
@@ -35,36 +46,70 @@ def provision_database(admin_url, database_name, app_password):
             dbapi = connection.connection.driver_connection
             with dbapi.cursor() as cursor:
                 cursor.execute(
-                    "SELECT rolname,rolsuper,rolbypassrls,rolcanlogin,rolcreatedb,rolcreaterole FROM pg_roles WHERE rolname IN (%s,%s)",
-                    (OWNER, APP),
+                    "SELECT rolname,rolsuper,rolbypassrls,rolcanlogin,rolcreatedb,rolcreaterole,"
+                    "rolinherit,rolreplication FROM pg_roles WHERE rolname IN (%s,%s,%s)",
+                    (OWNER, APP, MIGRATOR),
                 )
                 existing = {r[0]: r for r in cursor.fetchall()}
-                for name in (OWNER, APP):
+                # Inspect every existing role and membership before creating any
+                # authority. Never repair unrelated grants or rotate passwords.
+                for name in (OWNER, APP, MIGRATOR):
                     if name in existing:
-                        _, superuser, bypass, login, createdb, createrole = existing[name]
-                        if superuser or bypass or createdb or createrole or (name == OWNER and login):
+                        _, superuser, bypass, login, createdb, createrole, inherit, replication = existing[
+                            name
+                        ]
+                        if (
+                            superuser
+                            or bypass
+                            or createdb
+                            or createrole
+                            or inherit
+                            or replication
+                            or login != (name != OWNER)
+                        ):
                             raise RuntimeError("Existing dedicated role has unsafe attributes")
-                    elif name == OWNER:
-                        cursor.execute(
-                            sql.SQL(
-                                "CREATE ROLE {} NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS"
-                            ).format(sql.Identifier(name))
-                        )
-                    else:
-                        cursor.execute(
-                            sql.SQL(
-                                "CREATE ROLE {} LOGIN PASSWORD {} NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS"
-                            ).format(sql.Identifier(name), sql.Literal(app_password))
-                        )
-                cursor.execute("SELECT pg_has_role(%s,%s,'MEMBER')", (APP, OWNER))
-                if cursor.fetchone()[0]:
-                    raise RuntimeError("Application role must not be an owner-role member")
+                cursor.execute(
+                    "SELECT r.rolname,u.rolname,m.inherit_option,m.set_option,m.admin_option "
+                    "FROM pg_auth_members m JOIN pg_roles r ON r.oid=m.roleid "
+                    "JOIN pg_roles u ON u.oid=m.member "
+                    "WHERE r.rolname IN (%s,%s,%s) OR u.rolname IN (%s,%s,%s)",
+                    (OWNER, APP, MIGRATOR, OWNER, APP, MIGRATOR),
+                )
+                memberships = cursor.fetchall()
+                if any(row != (OWNER, MIGRATOR, False, True, False) for row in memberships):
+                    raise RuntimeError("Existing dedicated role has unsafe memberships")
                 cursor.execute(
                     "SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname=%s", (database_name,)
                 )
                 existing_db = cursor.fetchone()
                 if existing_db and existing_db[0] != OWNER:
                     raise RuntimeError("Existing commerce database must be owned by dedicated commerce owner")
+                for name in (OWNER, APP, MIGRATOR):
+                    if name in existing:
+                        continue
+                    if name == OWNER:
+                        cursor.execute(
+                            sql.SQL(
+                                "CREATE ROLE {} NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE "
+                                "NOINHERIT NOREPLICATION NOBYPASSRLS"
+                            ).format(sql.Identifier(name))
+                        )
+                    else:
+                        cursor.execute(
+                            sql.SQL(
+                                "CREATE ROLE {} LOGIN PASSWORD {} NOSUPERUSER NOCREATEDB NOCREATEROLE "
+                                "NOINHERIT NOREPLICATION NOBYPASSRLS"
+                            ).format(
+                                sql.Identifier(name),
+                                sql.Literal(app_password if name == APP else migrator_password),
+                            )
+                        )
+                if not memberships:
+                    cursor.execute(
+                        sql.SQL("GRANT {} TO {} WITH INHERIT FALSE, SET TRUE, ADMIN FALSE").format(
+                            sql.Identifier(OWNER), sql.Identifier(MIGRATOR)
+                        )
+                    )
                 if not existing_db:
                     cursor.execute(
                         sql.SQL("CREATE DATABASE {} OWNER {}").format(
@@ -75,8 +120,8 @@ def provision_database(admin_url, database_name, app_password):
                     sql.SQL("REVOKE ALL ON DATABASE {} FROM PUBLIC").format(sql.Identifier(database_name))
                 )
                 cursor.execute(
-                    sql.SQL("GRANT CONNECT ON DATABASE {} TO {}").format(
-                        sql.Identifier(database_name), sql.Identifier(APP)
+                    sql.SQL("GRANT CONNECT ON DATABASE {} TO {}, {}").format(
+                        sql.Identifier(database_name), sql.Identifier(APP), sql.Identifier(MIGRATOR)
                     )
                 )
         database_url = make_url(admin_url).set(database=database_name)
@@ -85,22 +130,66 @@ def provision_database(admin_url, database_name, app_password):
             with target.begin() as connection:
                 assert_database_target(connection)
                 connection.execute(text("REVOKE CREATE ON SCHEMA public FROM PUBLIC"))
+                connection.execute(text("GRANT USAGE,CREATE ON SCHEMA public TO codestra_whatsapp_owner"))
+                _handoff_legacy_version_table(connection)
         finally:
             target.dispose()
-        return {"database_name": database_name, "runtime_role": APP, "requires_pg_hba_restriction": True}
+        return {
+            "database_name": database_name,
+            "runtime_role": APP,
+            "migrator_role": MIGRATOR,
+            "requires_pg_hba_restriction": True,
+        }
     finally:
         engine.dispose()
 
 
-def _assert_operator(connection):
-    assert_database_target(connection)
-    allowed = connection.scalar(
-        text(
-            "SELECT rolsuper OR pg_has_role(current_user, 'codestra_whatsapp_owner', 'MEMBER') FROM pg_roles WHERE rolname=current_user"
-        )
+def _handoff_legacy_version_table(connection):
+    """Transfer only the known PR1 admin-owned version table in this database."""
+    table = connection.execute(
+        text("""SELECT c.oid,c.relkind,c.relpersistence,c.relispartition,c.relrowsecurity,c.relforcerowsecurity,
+        session_user AS provisioning_login, pg_get_userbyid(c.relowner) AS owner,
+        EXISTS (SELECT 1 FROM pg_inherits i WHERE i.inhrelid=c.oid OR i.inhparent=c.oid) AS inherits,
+        EXISTS (SELECT 1 FROM pg_trigger t WHERE t.tgrelid=c.oid AND NOT t.tgisinternal) AS user_triggers,
+        EXISTS (SELECT 1 FROM pg_rewrite w WHERE w.ev_class=c.oid) AS rewrite_rules
+        FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE n.nspname='public' AND c.relname='alembic_version'""")
+    ).one_or_none()
+    if table is None or table.owner == OWNER:
+        return
+    if (
+        table.owner != table.provisioning_login
+        or table.relkind != "r"
+        or table.relpersistence != "p"
+        or table.relispartition
+        or table.relrowsecurity
+        or table.relforcerowsecurity
+        or table.inherits
+        or table.user_triggers
+        or table.rewrite_rules
+    ):
+        raise RuntimeError("Existing migration version table is not a recognized legacy table")
+    columns = connection.execute(
+        text("""SELECT attnum,attname,format_type(atttypid,atttypmod),attnotnull,attidentity,attgenerated,
+        atthasdef,atthasmissing
+        FROM pg_attribute WHERE attrelid=:oid AND attnum>0 AND NOT attisdropped ORDER BY attnum"""),
+        {"oid": table.oid},
+    ).all()
+    primary_key = connection.scalar(
+        text("""SELECT count(*)=1 AND bool_and(contype='p' AND conkey=ARRAY[1]::smallint[]
+        AND NOT condeferrable AND NOT condeferred AND convalidated)
+        FROM pg_constraint WHERE conrelid=:oid"""),
+        {"oid": table.oid},
     )
-    if not allowed:
-        raise RuntimeError("Explicit privileged operator connection is required")
+    if (
+        columns != [(1, "version_num", "character varying(32)", True, "", "", False, False)]
+        or not primary_key
+    ):
+        raise RuntimeError("Existing migration version table has an unrecognized shape")
+    versions = connection.execute(text("SELECT version_num FROM public.alembic_version LIMIT 2")).all()
+    if versions != [("0001_commerce",)]:
+        raise RuntimeError("Existing migration version table has an unrecognized revision")
+    connection.execute(text("ALTER TABLE public.alembic_version OWNER TO codestra_whatsapp_owner"))
 
 
 def migrate_database(owner_url):
@@ -118,7 +207,6 @@ def migrate_database(owner_url):
             config = Config()
             config.set_main_option("script_location", str(migration_path))
             with engine.begin() as connection:
-                _assert_operator(connection)
                 config.attributes["connection"] = connection
                 command.upgrade(config, "head")
     finally:
@@ -144,7 +232,7 @@ def bootstrap_business(owner_url, name, currency, timezone, owner_subject, tax_b
     tenant = uuid4()
     try:
         with tenant_session(engine, tenant) as session:
-            _assert_operator(session.connection())
+            activate_operator_role(session.connection())
             session.execute(
                 text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
                 {"key": f"onboard:{owner_subject}:{name}"},
@@ -219,7 +307,7 @@ def register_channel(
     engine = make_engine(owner_url)
     try:
         with tenant_session(engine, tenant_id) as session:
-            _assert_operator(session.connection())
+            activate_operator_role(session.connection())
             business = session.scalar(
                 select(Business).where(Business.id == tenant_id, Business.active.is_(True))
             )
@@ -231,17 +319,26 @@ def register_channel(
             )
             # Explicitly privileged ownership check across bindings; never exposed
             # through runtime service/API queries or returning another tenant's data.
-            channel = session.scalar(
-                select(Channel)
-                .where(
+            binding = session.execute(
+                select(Channel.id, Channel.tenant_id).where(
                     Channel.provider == provider,
                     Channel.account_id == account_id,
                     Channel.phone_number_id == phone_number_id,
                 )
-                .with_for_update()
-            )
-            if channel is not None and channel.tenant_id != tenant_id:
+            ).one_or_none()
+            if binding is not None and binding.tenant_id != tenant_id:
                 raise ValueError("Provider binding is already bound to a different business")
+            # FOR UPDATE also applies UPDATE RLS. Discover ownership with the
+            # owner's SELECT policy first, then lock only this tenant's row.
+            channel = (
+                session.scalar(
+                    select(Channel)
+                    .where(Channel.id == binding.id, Channel.tenant_id == tenant_id)
+                    .with_for_update()
+                )
+                if binding is not None
+                else None
+            )
             if channel is None:
                 channel = Channel(
                     tenant_id=tenant_id,
@@ -268,7 +365,7 @@ def register_channel(
                 channel.policy_campaign_id = policy_campaign_id
                 action = None if unchanged else "channel.verified"
             if action:
-                actor = session.scalar(text("SELECT current_user"))
+                actor = session.scalar(text("SELECT session_user"))
                 session.add(
                     AuditEvent(
                         tenant_id=tenant_id,

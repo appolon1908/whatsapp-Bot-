@@ -16,6 +16,9 @@ depends_on = None
 def upgrade():
     sql = Path(__file__).with_name("0001_schema.sql").read_text()
     op.get_bind().exec_driver_sql(sql)
+    # The published SQL snapshot resets its role. Restore the runner's owner
+    # authority before Alembic stamps this revision or invokes the next one.
+    op.get_bind().exec_driver_sql("SET LOCAL ROLE codestra_whatsapp_owner")
 
 
 def downgrade():

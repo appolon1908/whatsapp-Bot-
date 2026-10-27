@@ -20,6 +20,28 @@ def test_provision_requires_explicit_admin_credentials(capsys):
     assert json.loads(capsys.readouterr().err)["error"] == "operator_configuration_missing"
 
 
+def test_provision_requires_separate_migrator_credential_before_database_access(monkeypatch, capsys):
+    from whatsapp_bot.cli import main
+
+    monkeypatch.setenv("COMMERCE_ADMIN_DATABASE_URL", "postgresql://operator@127.0.0.1:1/postgres")
+    monkeypatch.setenv("COMMERCE_APP_PASSWORD", "test-only-app-password-at-least-24")
+    assert main(["provision", "--database", "codestra_whatsapp_commerce"]) == 2
+    assert json.loads(capsys.readouterr().err)["error"] == "operator_configuration_missing"
+
+
+def test_conflicting_operator_database_variables_are_refused(monkeypatch, capsys):
+    from whatsapp_bot.cli import main
+
+    monkeypatch.setenv(
+        "COMMERCE_MIGRATOR_DATABASE_URL", "postgresql://migrator@127.0.0.1:1/codestra_whatsapp_commerce"
+    )
+    monkeypatch.setenv(
+        "COMMERCE_OWNER_DATABASE_URL", "postgresql://operator@127.0.0.1:2/codestra_whatsapp_commerce"
+    )
+    assert main(["migrate"]) == 2
+    assert json.loads(capsys.readouterr().err)["error"] == "invalid_configuration"
+
+
 def test_configuration_errors_do_not_print_secret_dsn(monkeypatch, capsys):
     from whatsapp_bot.cli import main
 
@@ -55,9 +77,20 @@ def test_worker_once_runs_as_restricted_role_with_sends_disabled(
 def test_runtime_role_cannot_execute_migrations(database_urls, monkeypatch, capsys):
     from whatsapp_bot.cli import main
 
-    monkeypatch.setenv("COMMERCE_OWNER_DATABASE_URL", database_urls[1].render_as_string(hide_password=False))
+    monkeypatch.setenv(
+        "COMMERCE_MIGRATOR_DATABASE_URL", database_urls[1].render_as_string(hide_password=False)
+    )
     assert main(["migrate"]) == 2
     assert json.loads(capsys.readouterr().err)["error"] == "operator_action_refused"
+
+
+@pytest.mark.parametrize("variable", ["COMMERCE_MIGRATOR_DATABASE_URL", "COMMERCE_OWNER_DATABASE_URL"])
+def test_named_migrator_cli_applies_migrations(migrator_url, monkeypatch, capsys, variable):
+    from whatsapp_bot.cli import main
+
+    monkeypatch.setenv(variable, migrator_url.render_as_string(hide_password=False))
+    assert main(["migrate"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"status": "migrated"}
 
 
 def test_enabling_delivery_without_policy_credentials_is_refused(

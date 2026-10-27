@@ -111,6 +111,9 @@ def test_restore_preserves_pending_work_ownership_and_rls(
         database_urls[0],
         restore_name,
         os.environ.get("TEST_DATABASE_APP_PASSWORD", "local-isolated-test-app-password-only"),
+        migrator_password=os.environ.get(
+            "TEST_DATABASE_MIGRATOR_PASSWORD", "local-isolated-test-migrator-password-only"
+        ),
     )
     restored_admin = database_urls[0].set(database=restore_name)
     restored_app = database_urls[1].set(database=restore_name)

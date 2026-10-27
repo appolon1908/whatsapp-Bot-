@@ -1,9 +1,12 @@
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
+from whatsapp_bot.db import activate_operator_role
+
 
 def run_migrations(connection):
-    context.configure(connection=connection, target_metadata=None)
+    activate_operator_role(connection)
+    context.configure(connection=connection, target_metadata=None, version_table_schema="public")
     with context.begin_transaction():
         context.run_migrations()
 
@@ -18,5 +21,5 @@ else:
         poolclass=pool.NullPool,
         hide_parameters=True,
     )
-    with engine.connect() as connection:
+    with engine.begin() as connection:
         run_migrations(connection)

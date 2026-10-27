@@ -7,10 +7,10 @@ from whatsapp_bot.provision import migrate_database, provision_database
 
 
 def test_migration_rerun_keeps_data_and_all_tenant_tables_forced(
-    database_urls, admin_engine, engine, tenant_a
+    migrator_url, admin_engine, engine, tenant_a
 ):
-    migrate_database(database_urls[0])
-    migrate_database(database_urls[0])
+    migrate_database(migrator_url)
+    migrate_database(migrator_url)
     with admin_engine.connect() as connection:
         assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0001_commerce"
         tables = connection.execute(
@@ -49,7 +49,12 @@ def test_route_function_not_public_and_inactive_business_not_routed(admin_engine
 
 def test_database_guard_precedes_network_and_plain_url_uses_psycopg():
     with pytest.raises(ValueError):
-        provision_database("postgresql://nobody:unavailable@127.0.0.1:1/postgres", "unrelated", "a" * 32)
+        provision_database(
+            "postgresql://nobody:unavailable@127.0.0.1:1/postgres",
+            "unrelated",
+            "a" * 32,
+            migrator_password="m" * 32,
+        )
     with pytest.raises(ValueError):
         make_engine("sqlite://")
     engine = make_engine("postgresql://nobody@127.0.0.1:1/codestra_whatsapp_commerce_test")
@@ -57,23 +62,23 @@ def test_database_guard_precedes_network_and_plain_url_uses_psycopg():
     engine.dispose()
 
 
-def test_bootstrap_repeated_request_is_non_destructive_and_requires_operator(database_urls):
+def test_bootstrap_repeated_request_is_non_destructive_and_requires_operator(database_urls, migrator_url):
     from uuid import uuid4
 
     from whatsapp_bot.provision import bootstrap_business
 
     name = f"Onboard-{uuid4()}"
-    first = bootstrap_business(database_urls[0], name, "USD", "UTC", "idempotent-owner", 125)
-    second = bootstrap_business(database_urls[0], name, "USD", "UTC", "idempotent-owner", 125)
+    first = bootstrap_business(migrator_url, name, "USD", "UTC", "idempotent-owner", 125)
+    second = bootstrap_business(migrator_url, name, "USD", "UTC", "idempotent-owner", 125)
     assert first["id"] == second["id"]
     with pytest.raises(ValueError, match="existing"):
-        bootstrap_business(database_urls[0], name, "USD", "UTC", "idempotent-owner", 126)
+        bootstrap_business(migrator_url, name, "USD", "UTC", "idempotent-owner", 126)
     with pytest.raises(RuntimeError, match="operator"):
         bootstrap_business(database_urls[1], f"Invalid-{uuid4()}", "USD", "UTC", "attacker", 0)
 
 
 def test_register_channel_requires_operator_and_never_reassigns_tenant(
-    database_urls, tenant_a, tenant_b, engine
+    database_urls, migrator_url, tenant_a, tenant_b, engine
 ):
     from uuid import UUID, uuid4
 
@@ -90,14 +95,14 @@ def test_register_channel_requires_operator_and_never_reassigns_tenant(
     }
     with pytest.raises(RuntimeError, match="operator"):
         register_channel(database_urls[1], **kwargs)
-    result = register_channel(database_urls[0], **kwargs)
+    result = register_channel(migrator_url, **kwargs)
     assert result["active"] is True
-    assert register_channel(database_urls[0], **kwargs)["id"] == result["id"]
+    assert register_channel(migrator_url, **kwargs)["id"] == result["id"]
     assert lookup_channel(engine, "meta", account, "verified-phone") == (tenant_a, UUID(result["id"]))
     with pytest.raises(ValueError, match="bound"):
-        register_channel(database_urls[0], **{**kwargs, "tenant_id": tenant_b})
+        register_channel(migrator_url, **{**kwargs, "tenant_id": tenant_b})
     with pytest.raises(ValueError, match="verification"):
-        register_channel(database_urls[0], **{**kwargs, "verification_reference": ""})
+        register_channel(migrator_url, **{**kwargs, "verification_reference": ""})
     with engine.begin() as connection:
         connection.execute(
             text("SELECT set_config('app.tenant_id', :tenant, true)"), {"tenant": str(tenant_a)}
@@ -106,9 +111,9 @@ def test_register_channel_requires_operator_and_never_reassigns_tenant(
             text("UPDATE commerce.channels SET active=false WHERE id=:id"), {"id": result["id"]}
         )
     with pytest.raises(ValueError, match="fresh verification"):
-        register_channel(database_urls[0], **kwargs)
+        register_channel(migrator_url, **kwargs)
     reactivated = register_channel(
-        database_urls[0], **{**kwargs, "verification_reference": "operator-evidence-2"}
+        migrator_url, **{**kwargs, "verification_reference": "operator-evidence-2"}
     )
     assert reactivated["active"] is True
     assert reactivated["id"] == result["id"]
