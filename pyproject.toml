@@ -1,0 +1,45 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "codestra-whatsapp-commerce"
+version = "0.1.0"
+description = "Tenant-isolated commerce API and guided WhatsApp bot for Codestra"
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+  "fastapi>=0.162,<1",
+  "uvicorn>=0.34,<1",
+  "sqlalchemy>=2.0.36,<2.1",
+  "psycopg[binary]>=3.2,<4",
+  "alembic>=1.14,<2",
+  "pydantic-settings>=2.7,<3",
+  "PyJWT[crypto]>=2.10,<3",
+  "httpx>=0.28,<1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3,<10", "pytest-cov>=6,<8", "ruff>=0.11,<1", "pip-audit>=2.8,<3"]
+
+[project.scripts]
+commerce = "whatsapp_bot.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/whatsapp_bot"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"migrations" = "whatsapp_bot/migrations"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = ["integration: requires an isolated PostgreSQL server", "concurrency: exercises database transaction races"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 110
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "B", "UP"]
+
