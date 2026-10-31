@@ -1,0 +1,87 @@
+name: codestra-whatsapp-commerce-local
+
+x-runtime-environment: &runtime-environment
+  COMMERCE_DATABASE_URL: postgresql+psycopg://codestra_whatsapp_app:${COMMERCE_APP_PASSWORD:?Set a generated hexadecimal app password in .env}@db:5432/codestra_whatsapp_commerce
+  COMMERCE_EXPECTED_DATABASE_NAME: codestra_whatsapp_commerce
+  COMMERCE_ENVIRONMENT: local
+  COMMERCE_JWT_ISSUER: ${COMMERCE_JWT_ISSUER:-}
+  COMMERCE_JWT_AUDIENCE: ${COMMERCE_JWT_AUDIENCE:-}
+  COMMERCE_JWKS_URL: ${COMMERCE_JWKS_URL:-}
+  COMMERCE_JWT_PUBLIC_KEY: ${COMMERCE_JWT_PUBLIC_KEY:-}
+  COMMERCE_INGRESS_SECRET: ${COMMERCE_INGRESS_SECRET:-}
+  COMMERCE_OUTBOUND_ENABLED: ${COMMERCE_OUTBOUND_ENABLED:-false}
+  COMMERCE_POLICY_BASE_URL: ${COMMERCE_POLICY_BASE_URL:-}
+  COMMERCE_POLICY_BEARER_TOKEN: ${COMMERCE_POLICY_BEARER_TOKEN:-}
+  COMMERCE_ALLOW_INSECURE_LOCAL_HTTP: "false"
+
+x-application: &application
+  build: .
+  image: codestra-whatsapp-commerce:local
+  init: true
+  read_only: true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=64m
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  depends_on:
+    db:
+      condition: service_healthy
+
+services:
+  db:
+    image: postgres:16-bookworm
+    environment:
+      POSTGRES_USER: commerce_operator
+      POSTGRES_PASSWORD: ${COMMERCE_POSTGRES_ADMIN_PASSWORD:?Set a generated hexadecimal admin password in .env}
+      POSTGRES_DB: postgres
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256 --auth-local=scram-sha-256
+    command: [postgres, -c, hba_file=/etc/postgresql/dev-pg_hba.conf, -c, password_encryption=scram-sha-256, -c, timezone=UTC]
+    ports:
+      - "127.0.0.1:55483:5432"
+    volumes:
+      - commerce-local-postgres:/var/lib/postgresql/data
+      - ./scripts/dev-pg_hba.conf:/etc/postgresql/dev-pg_hba.conf:ro
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U commerce_operator -d postgres"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  api:
+    <<: *application
+    command: [api, --host, 0.0.0.0, --port, "8783"]
+    environment: *runtime-environment
+    ports:
+      - "127.0.0.1:8783:8783"
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8783/healthz', timeout=2)"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+
+  worker:
+    <<: *application
+    profiles: [worker]
+    command: [worker]
+    environment:
+      <<: *runtime-environment
+      COMMERCE_WORKER_TENANT_IDS: ${COMMERCE_WORKER_TENANT_IDS:-[]}
+
+  provisioner:
+    <<: *application
+    profiles: [operator]
+    command: [provision, --database, codestra_whatsapp_commerce]
+    environment:
+      COMMERCE_ADMIN_DATABASE_URL: postgresql+psycopg://commerce_operator:${COMMERCE_POSTGRES_ADMIN_PASSWORD:?Set a generated hexadecimal admin password in .env}@db:5432/postgres
+      COMMERCE_APP_PASSWORD: ${COMMERCE_APP_PASSWORD:?Set a generated hexadecimal app password in .env}
+      COMMERCE_MIGRATOR_PASSWORD: ${COMMERCE_MIGRATOR_PASSWORD:?Set a distinct generated hexadecimal migrator password in .env}
+
+  operator:
+    <<: *application
+    profiles: [operator]
+    command: [--help]
+    environment:
+      COMMERCE_MIGRATOR_DATABASE_URL: postgresql+psycopg://codestra_whatsapp_migrator:${COMMERCE_MIGRATOR_PASSWORD:?Set a distinct generated hexadecimal migrator password in .env}@db:5432/codestra_whatsapp_commerce
+
+volumes:
+  commerce-local-postgres:

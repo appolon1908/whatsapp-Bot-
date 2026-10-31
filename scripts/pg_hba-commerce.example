@@ -1,0 +1,10 @@
+# Operator-reviewed template: place BEFORE any broad host allow rules, reload, test.
+# Replace addresses with exact API/worker and separate operator sources. Never apply automatically.
+# Both login roles need restrictions covering every network path.
+host codestra_whatsapp_commerce codestra_whatsapp_app 127.0.0.1/32 scram-sha-256
+host codestra_whatsapp_commerce codestra_whatsapp_migrator 127.0.0.1/32 scram-sha-256
+host all codestra_whatsapp_app,codestra_whatsapp_migrator 0.0.0.0/0 reject
+host all codestra_whatsapp_app,codestra_whatsapp_migrator ::/0 reject
+local all codestra_whatsapp_app,codestra_whatsapp_migrator reject
+# For an isolated CI cluster substitute its codestra_whatsapp_commerce_test DB.
+# PUBLIC CONNECT on unrelated DBs can remain true; these HBA deny rules are required.
